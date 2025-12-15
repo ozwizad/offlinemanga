@@ -342,21 +342,62 @@ class MangaScraper:
     def get_chapter_images(self, chapter_url, site_type='generic'):
         """Get images from chapter - ONLY actual manga pages"""
         try:
+            print(f"Getting images for: {chapter_url}")
+            print(f"Site type: {site_type}")
+            
             if site_type == 'mangadex':
+                # Extract chapter ID from URL
                 chapter_id = re.search(r'chapter/([a-f0-9-]+)', chapter_url)
-                if chapter_id:
-                    api_url = f'https://api.mangadex.org/at-home/server/{chapter_id.group(1)}'
-                    data = requests.get(api_url).json()
+                if not chapter_id:
+                    print("Could not extract chapter ID from URL")
+                    return []
+                
+                chapter_id = chapter_id.group(1)
+                print(f"MangaDex Chapter ID: {chapter_id}")
+                
+                try:
+                    # Get image server info
+                    api_url = f'https://api.mangadex.org/at-home/server/{chapter_id}'
+                    print(f"Calling API: {api_url}")
+                    
+                    response = requests.get(api_url, timeout=10)
+                    print(f"API Response Status: {response.status_code}")
+                    
+                    if response.status_code != 200:
+                        print(f"API Error: {response.text}")
+                        return []
+                    
+                    data = response.json()
+                    print(f"API Response: {data.keys()}")
+                    
                     base_url = data['baseUrl']
                     chapter_hash = data['chapter']['hash']
                     
+                    # Use high quality images (data) or data-saver
+                    image_files = data['chapter'].get('data', [])
+                    if not image_files:
+                        image_files = data['chapter'].get('dataSaver', [])
+                    
+                    print(f"Found {len(image_files)} image files")
+                    
                     images = []
-                    for filename in data['chapter']['data']:
-                        images.append(f'{base_url}/data/{chapter_hash}/{filename}')
+                    for filename in image_files:
+                        img_url = f'{base_url}/data/{chapter_hash}/{filename}'
+                        images.append(img_url)
+                        print(f"  Image: {img_url[:80]}")
+                    
                     return images
+                except Exception as api_error:
+                    print(f"MangaDex API Error: {api_error}")
+                    import traceback
+                    traceback.print_exc()
+                    return []
             
-            # Generic image extraction with filtering
-            response = requests.get(chapter_url, headers=self.headers, timeout=10)
+            # For other sites, scrape HTML
+            print(f"Fetching page: {chapter_url}")
+            response = requests.get(chapter_url, headers=self.headers, timeout=15)
+            print(f"Page response: {response.status_code}")
+            
             soup = BeautifulSoup(response.content, 'html.parser')
             
             images = []
@@ -371,6 +412,7 @@ class MangaScraper:
                 print(f"Found {len(reader_containers)} potential reader containers")
                 search_area = reader_containers
             else:
+                print("No reader container found, searching entire page")
                 search_area = [soup]
             
             for container in search_area:
