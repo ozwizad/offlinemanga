@@ -595,7 +595,7 @@ def scrape_manga():
 
 @app.route('/api/download', methods=['POST'])
 def download_chapters():
-    """Create and download PDF"""
+    """Create and download PDF with actual manga images"""
     try:
         data = request.json
         chapters = data.get('chapters', [])
@@ -603,6 +603,10 @@ def download_chapters():
         
         if not chapters:
             return jsonify({'error': 'No chapters'}), 400
+        
+        # Limit for safety
+        if len(chapters) > 5:
+            return jsonify({'error': 'Maximum 5 chapters at once'}), 400
         
         print(f"Creating PDF for {len(chapters)} chapters")
         
@@ -613,27 +617,163 @@ def download_chapters():
         c = canvas.Canvas(pdf_path, pagesize=A4)
         width, height = A4
         
-        # Cover
-        c.setFont("Helvetica-Bold", 24)
-        c.drawString(50, height - 100, manga_title[:50])
-        c.setFont("Helvetica", 14)
-        c.drawString(50, height - 130, f"{len(chapters)} Chapters")
+        # Cover page
+        c.setFont("Helvetica-Bold", 28)
+        title_text = manga_title[:50]
+        c.drawString(50, height - 100, title_text)
+        c.setFont("Helvetica", 16)
+        c.drawString(50, height - 140, f"{len(chapters)} Chapters")
+        c.setFont("Helvetica-Oblique", 10)
+        c.drawString(50, height - 170, "High Quality Manga PDF")
         c.showPage()
         
-        # Chapter pages
-        for idx, ch in enumerate(chapters):
-            c.setFont("Helvetica-Bold", 16)
-            c.drawString(50, height - 80, f"Chapter {ch['number']}")
-            c.setFont("Helvetica", 11)
-            c.drawString(50, height - 105, ch['title'][:70])
-            c.setFont("Helvetica", 8)
-            c.drawString(50, height - 125, f"URL: {ch['url'][:80]}")
-            c.setFont("Helvetica-Oblique", 9)
-            c.drawString(50, height - 145, f"({idx + 1} / {len(chapters)})")
+        # Process each chapter
+        for chapter_idx, ch in enumerate(chapters):
+            chapter_url = ch.get('url')
+            chapter_title = ch.get('title', f"Chapter {ch.get('number', '?')}")
+            
+            print(f"\n{'='*50}")
+            print(f"Processing: {chapter_title}")
+            print(f"URL: {chapter_url}")
+            print(f"{'='*50}")
+            
+            # Chapter title page
+            c.setFont("Helvetica-Bold", 24)
+            c.drawString(50, height - 100, f"Chapter {ch.get('number', '?')}")
+            c.setFont("Helvetica", 14)
+            # Wrap long titles
+            if len(chapter_title) > 50:
+                c.drawString(50, height - 130, chapter_title[:50])
+                c.drawString(50, height - 150, chapter_title[50:100])
+            else:
+                c.drawString(50, height - 130, chapter_title)
             c.showPage()
+            
+            # Get images for this chapter
+            try:
+                site_type = scraper.detect_site(chapter_url)
+                print(f"Site type: {site_type}")
+                
+                images = scraper.get_chapter_images(chapter_url, site_type)
+                print(f"Found {len(images)} images")
+                
+                if not images:
+                    # No images page
+                    c.setFont("Helvetica", 12)
+                    c.drawString(50, height/2, "No images found for this chapter")
+                    c.drawString(50, height/2 - 30, f"Visit: {chapter_url[:70]}")
+                    c.showPage()
+                    continue
+                
+                print(f"  → Downloading ALL {len(images)} images (this may take a while)")
+                
+                # Download and add each image
+                for img_idx, img_url in enumerate(images):  # ALL IMAGES!
+                    try:
+                        print(f"  Downloading image {img_idx + 1}/{len(images)}: {img_url[:60]}")
+                        
+                        # Download image
+                        img_response = requests.get(
+                            img_url, 
+                            headers=scraper.headers, 
+                            timeout=15,
+                            stream=True
+                        )
+                        
+                        if img_response.status_code != 200:
+                            print(f"  Failed to download: {img_response.status_code}")
+                            continue
+                        
+                        # Open image
+                        img = Image.open(BytesIO(img_response.content))
+                        print(f"  Image size: {img.size}, mode: {img.mode}")
+                        
+                        # Convert to RGB if needed
+                        if img.mode not in ('RGB', 'L'):
+                            img = img.convert('RGB')
+                        
+                        # Get dimensions
+                        img_width, img_height = img.size
+                        aspect_ratio = img_height / img_width
+                        
+                        # Calculate PDF dimensions (fit to page with margins)
+                        page_width = width - 40  # 20px margin each side
+                        page_height = height - 40
+                        
+                        # Scale to fit page while maintaining aspect ratio
+                        if aspect_ratio > (page_height / page_width):
+                            # Height is limiting factor
+                            new_height = page_height
+                            new_width = new_height / aspect_ratio
+                        else:
+                            # Width is limiting factor
+                            new_width = page_width
+                            new_height = new_width * aspect_ratio
+                        
+                        # Center on page
+                        x_pos = (width - new_width) / 2
+                        y_pos = (height - new_height) / 2
+                        
+                        # Optimize image quality
+                        temp_img = BytesIO()
+                        
+                        # High quality JPEG
+                        if img.mode == 'L':
+                            img.save(temp_img, format='JPEG', quality=95, optimize=True)
+                        else:
+                            img.save(temp_img, format='JPEG', quality=90, optimize=True)
+                        temp_img.seek(0)
+                        
+                        # Add to PDF
+                        c.drawImage(
+                            ImageReader(temp_img),
+                            x_pos, y_pos,
+                            width=new_width,
+                            height=new_height,
+                            preserveAspectRatio=True
+                        )
+                        
+                        # Page number footer
+                        c.setFont("Helvetica", 8)
+                        c.drawString(
+                            width/2 - 50, 15,
+                            f"Ch.{ch.get('number')} - Page {img_idx + 1}/{len(images)}"
+                        )
+                        
+                        c.showPage()
+                        print(f"  ✓ Added to PDF")
+                        
+                        # Small delay to avoid rate limiting
+                        time.sleep(0.3)
+                        
+                    except Exception as img_error:
+                        print(f"  ✗ Image error: {img_error}")
+                        # Add error page
+                        c.setFont("Helvetica", 10)
+                        c.drawString(50, height/2, f"Failed to load image {img_idx + 1}")
+                        c.drawString(50, height/2 - 20, f"Error: {str(img_error)[:60]}")
+                        c.showPage()
+                        continue
+                
+                print(f"✓ Chapter {ch.get('number')} complete!")
+                
+            except Exception as chapter_error:
+                print(f"✗ Chapter error: {chapter_error}")
+                import traceback
+                traceback.print_exc()
+                
+                # Add error page
+                c.setFont("Helvetica", 12)
+                c.drawString(50, height/2, f"Failed to process chapter")
+                c.drawString(50, height/2 - 30, f"Error: {str(chapter_error)[:60]}")
+                c.showPage()
+                continue
         
+        # Save PDF
         c.save()
-        print(f"PDF created: {pdf_path}")
+        print(f"\n{'='*50}")
+        print(f"✓ PDF CREATED: {pdf_path}")
+        print(f"{'='*50}\n")
         
         return send_file(pdf_path, as_attachment=True, download_name=f"{manga_title[:30]}.pdf")
         
