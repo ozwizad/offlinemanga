@@ -4,5 +4,5 @@ requests==2.31.0
 beautifulsoup4==4.12.2
 pillow==10.4.0
 reportlab==4.0.7
-lxml==4.9.3
 gunicorn==21.2.0
+html5lib==1.1
