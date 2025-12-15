@@ -806,9 +806,13 @@ def download_chapters():
                         
                         for retry in range(max_retries):
                             try:
+                                # Add referer header to bypass hotlink protection
+                                img_headers = scraper.headers.copy()
+                                img_headers['Referer'] = chapter_url
+                                
                                 img_response = requests.get(
                                     img_url, 
-                                    headers=scraper.headers, 
+                                    headers=img_headers, 
                                     timeout=20,
                                     stream=True
                                 )
