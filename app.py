@@ -19,7 +19,7 @@ CORS(app)
 class MangaScraper:
     def __init__(self):
         self.headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
         }
         self.session = requests.Session()
@@ -67,60 +67,46 @@ class MangaScraper:
             return None
     
     def scrape_manganato(self, url):
-        """Manganato scraper - updated for new HTML structure"""
         try:
             print(f"Fetching: {url}")
             resp = self.session.get(url, timeout=15)
-            print(f"Status: {resp.status_code}")
             soup = BeautifulSoup(resp.content, 'html.parser')
             
-            # Get title - try multiple selectors
             title = 'Unknown Manga'
-            for sel in ['h1', '.story-info-right h1', '.panel-story-info h1']:
+            for sel in ['h1', '.story-info-right h1']:
                 elem = soup.select_one(sel)
                 if elem:
                     title = elem.text.strip()
                     break
             print(f"Title: {title}")
             
-            # Get chapters - find all links that look like chapter links
             chapters = []
-            
-            # Method 1: Look for chapter links in the page
             for link in soup.find_all('a', href=True):
                 href = link.get('href', '')
                 text = link.text.strip()
                 
-                # Check if this is a chapter link
-                # Pattern: /manga/xxx/chapter-XX or contains "Chapter XX"
                 if '/chapter-' in href or '/chapter/' in href:
-                    # Extract chapter number from URL or text
                     num_match = re.search(r'chapter[/-](\d+\.?\d*)', href, re.I)
                     if not num_match:
                         num_match = re.search(r'chapter\s*(\d+\.?\d*)', text, re.I)
                     
                     if num_match:
                         num = num_match.group(1)
-                        # Make URL absolute
                         if not href.startswith('http'):
                             href = urljoin(url, href)
-                        
                         chapters.append({
                             'number': num,
                             'title': text or f'Chapter {num}',
                             'url': href
                         })
             
-            # Remove duplicates (keep first occurrence)
             seen = set()
             unique = []
             for ch in chapters:
-                key = ch['url']
-                if key not in seen:
-                    seen.add(key)
+                if ch['url'] not in seen:
+                    seen.add(ch['url'])
                     unique.append(ch)
             
-            # Sort by chapter number
             try:
                 unique.sort(key=lambda x: float(x['number']))
             except:
@@ -128,11 +114,8 @@ class MangaScraper:
             
             print(f"Found {len(unique)} chapters")
             return {'title': title, 'chapters': unique}
-            
         except Exception as e:
             print(f"Manganato error: {e}")
-            import traceback
-            traceback.print_exc()
             return None
     
     def scrape_asura(self, url):
@@ -143,7 +126,8 @@ class MangaScraper:
             title = title.text.strip() if title else 'Unknown'
             chapters = []
             for link in soup.find_all('a', href=True):
-                href, text = link.get('href', ''), link.text.strip()
+                href = link.get('href', '')
+                text = link.text.strip()
                 if '/chapter/' in href.lower() or 'chapter' in text.lower():
                     num = re.search(r'chapter[:\s-]*(\d+)', text, re.I) or re.search(r'/chapter[/-](\d+)', href, re.I)
                     if num:
@@ -152,7 +136,10 @@ class MangaScraper:
                         chapters.append({'number': num.group(1), 'title': text[:80], 'url': href})
             seen = set()
             unique = [c for c in chapters if c['url'] not in seen and not seen.add(c['url'])]
-            unique.sort(key=lambda x: float(x['number']))
+            try:
+                unique.sort(key=lambda x: float(x['number']))
+            except:
+                pass
             return {'title': title, 'chapters': unique}
         except Exception as e:
             print(f"Asura error: {e}")
@@ -171,58 +158,39 @@ class MangaScraper:
                 data = requests.get(api, timeout=10).json()
                 base = data.get('baseUrl')
                 ch = data.get('chapter', {})
-                hash_ = ch.get('hash')
+                hash_val = ch.get('hash')
                 files = ch.get('dataSaver', []) or ch.get('data', [])
                 quality = 'data-saver' if ch.get('dataSaver') else 'data'
-                return [f'{base}/{quality}/{hash_}/{f}' for f in files] if base and hash_ else []
+                if base and hash_val:
+                    return [f'{base}/{quality}/{hash_val}/{f}' for f in files]
+                return []
             
-            # For manganato and others
             print(f"Fetching chapter: {url}")
             resp = self.session.get(url, timeout=15)
             soup = BeautifulSoup(resp.content, 'html.parser')
             
             images = []
+            container = soup.select_one('.container-chapter-reader') or soup
             
-            # Try multiple container selectors
-            containers = [
-                soup.select_one('.container-chapter-reader'),
-                soup.select_one('.reading-content'),
-                soup.select_one('.chapter-content'),
-                soup.select_one('#chapter-content'),
-                soup
-            ]
-            
-            for container in containers:
-                if not container:
+            for img in container.find_all('img'):
+                src = img.get('src') or img.get('data-src')
+                if not src:
                     continue
-                for img in container.find_all('img'):
-                    src = img.get('src') or img.get('data-src') or img.get('data-lazy-src')
-                    if not src:
-                        continue
-                    # Skip non-manga images
-                    if any(skip in src.lower() for skip in ['logo', 'icon', 'ad', 'banner', '.gif', 'avatar']):
-                        continue
-                    # Must be image
-                    if any(ext in src.lower() for ext in ['.jpg', '.jpeg', '.png', '.webp']):
-                        if not src.startswith('http'):
-                            src = urljoin(url, src)
-                        images.append(src)
-                
-                if images:
-                    break  # Found images, stop looking
+                if any(skip in src.lower() for skip in ['logo', 'icon', 'ad', 'banner', '.gif']):
+                    continue
+                if any(ext in src.lower() for ext in ['.jpg', '.jpeg', '.png', '.webp']):
+                    if not src.startswith('http'):
+                        src = urljoin(url, src)
+                    images.append(src)
             
-            # Remove duplicates
             images = list(dict.fromkeys(images))
             print(f"Found {len(images)} images")
             return images
-            
         except Exception as e:
             print(f"Get images error: {e}")
             return []
     
     def download_image(self, img_url, referer):
-        """Download single image with proxy"""
-        # Try wsrv.nl proxy first
         try:
             proxy = f"https://wsrv.nl/?url={quote(img_url, safe='')}&n=-1"
             r = requests.get(proxy, timeout=15)
@@ -230,19 +198,15 @@ class MangaScraper:
                 return (img_url, r.content)
         except:
             pass
-        
-        # Direct fallback
         try:
             r = requests.get(img_url, headers={'Referer': referer, 'User-Agent': self.headers['User-Agent']}, timeout=10)
             if r.status_code == 200 and len(r.content) > 500:
                 return (img_url, r.content)
         except:
             pass
-        
         return (img_url, None)
     
     def download_parallel(self, urls, referer, workers=6):
-        """Download images in parallel"""
         results = {}
         with ThreadPoolExecutor(max_workers=workers) as ex:
             futures = {ex.submit(self.download_image, u, referer): u for u in urls}
@@ -255,85 +219,197 @@ class MangaScraper:
 
 scraper = MangaScraper()
 
-HTML = '''<!DOCTYPE html>
-<html><head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Manga PDF</title>
+HTML_TEMPLATE = """<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Manga PDF Downloader</title>
 <script src="https://cdn.tailwindcss.com"></script>
-<style>@keyframes s{0%{background-position:0 50%}100%{background-position:200% 50%}}.sh{background:linear-gradient(90deg,#a855f7,#ec4899,#a855f7);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-size:200% auto;animation:s 3s linear infinite}</style>
-</head><body class="min-h-screen bg-gradient-to-br from-slate-950 via-purple-950 to-slate-900 text-white p-4">
-<div class="max-w-3xl mx-auto">
-<h1 class="text-4xl font-black text-center mb-2 sh">MANGA DOWNLOADER</h1>
-<p class="text-center text-purple-300 mb-8">Link yapıştır → Chapter seç → PDF indir</p>
-<div class="bg-slate-900/50 border border-purple-500/30 rounded-xl p-4 mb-4">
+</head>
+<body class="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 text-white p-4">
+<div class="max-w-2xl mx-auto">
+<h1 class="text-3xl font-bold text-center mb-2 text-purple-400">MANGA DOWNLOADER</h1>
+<p class="text-center text-gray-400 mb-6">Link yapistir - Chapter sec - PDF indir</p>
+
+<div class="bg-slate-800 rounded-lg p-4 mb-4">
 <div class="flex gap-2">
-<input id="url" placeholder="https://manganato.gg/manga/..." class="flex-1 bg-slate-950 border border-purple-500/50 rounded-lg px-3 py-2">
-<button onclick="scan()" class="px-5 py-2 bg-gradient-to-r from-purple-600 to-pink-600 rounded-lg font-bold">TARA</button>
+<input id="urlInput" type="text" placeholder="https://manganato.gg/manga/..." class="flex-1 bg-slate-700 border border-purple-500 rounded px-3 py-2 text-white">
+<button id="scanBtn" class="px-4 py-2 bg-purple-600 hover:bg-purple-500 rounded font-bold">TARA</button>
 </div>
-<p class="text-xs text-purple-400 mt-2">✓ Manganato, MangaDex, Asura | ⚡ Paralel indirme</p>
+<p class="text-xs text-gray-500 mt-2">Desteklenen: Manganato, MangaDex, Asura</p>
 </div>
-<div id="load" class="hidden text-center py-12"><div class="animate-spin h-10 w-10 border-2 border-purple-400 border-t-transparent rounded-full mx-auto mb-2"></div>Taranıyor...</div>
-<div id="res" class="hidden bg-slate-900/50 border border-purple-500/30 rounded-xl p-4">
-<div class="flex justify-between mb-3"><h2 id="title" class="text-xl font-bold"></h2><button onclick="selAll()" class="text-sm px-3 py-1 bg-purple-600/30 rounded">Tümü</button></div>
-<div class="mb-3 flex gap-2 items-center"><span>Seçili: <b id="cnt">0</b></span><button id="dl" onclick="down()" disabled class="px-4 py-1 bg-pink-600 disabled:opacity-40 rounded font-bold">📥 İNDİR</button><span class="text-xs text-yellow-400">Max 2 chapter</span></div>
-<div id="chs" class="space-y-1 max-h-80 overflow-y-auto"></div>
+
+<div id="loading" class="hidden text-center py-8">
+<div class="animate-spin h-8 w-8 border-2 border-purple-400 border-t-transparent rounded-full mx-auto mb-2"></div>
+<p>Taraniyor...</p>
 </div>
-<div id="prog" class="hidden bg-slate-900/50 border border-purple-500/30 rounded-xl p-4 mt-4 text-center">
-<div class="font-bold mb-2">İNDİRİLİYOR...</div>
-<div id="ptxt" class="text-sm text-purple-300 mb-2"></div>
-<div class="bg-slate-800 rounded-full h-2"><div id="pbar" class="h-full bg-gradient-to-r from-purple-600 to-pink-600 rounded-full transition-all" style="width:0"></div></div>
+
+<div id="results" class="hidden bg-slate-800 rounded-lg p-4">
+<div class="flex justify-between items-center mb-3">
+<h2 id="mangaTitle" class="text-xl font-bold text-purple-300"></h2>
+<button id="selectAllBtn" class="text-sm px-3 py-1 bg-purple-700 rounded">Tumunu Sec</button>
+</div>
+<div class="mb-3 flex gap-3 items-center">
+<span>Secili: <strong id="selectedCount">0</strong></span>
+<button id="downloadBtn" disabled class="px-4 py-2 bg-pink-600 disabled:opacity-40 rounded font-bold">INDIR</button>
+</div>
+<div id="chapterList" class="space-y-1 max-h-72 overflow-y-auto"></div>
+</div>
+
+<div id="progress" class="hidden bg-slate-800 rounded-lg p-4 mt-4 text-center">
+<p class="font-bold mb-2">INDIRILIYOR...</p>
+<p id="progressText" class="text-sm text-gray-400 mb-2"></p>
+<div class="bg-slate-700 rounded-full h-2">
+<div id="progressBar" class="h-full bg-purple-500 rounded-full" style="width: 0%"></div>
 </div>
 </div>
+</div>
+
 <script>
-let chs=[],sel=new Set(),ttl='';
-async function scan(){
-  const u=document.getElementById('url').value.trim();if(!u)return alert('Link girin');
-  document.getElementById('load').classList.remove('hidden');document.getElementById('res').classList.add('hidden');
-  try{
-    const r=await fetch('/api/scrape',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:u})});
-    const d=await r.json();if(!r.ok||!d.chapters?.length)throw new Error(d.error||'Bulunamadı');
-    chs=d.chapters;ttl=d.title;sel.clear();document.getElementById('title').textContent=ttl;render();
-    document.getElementById('load').classList.add('hidden');document.getElementById('res').classList.remove('hidden');
-  }catch(e){document.getElementById('load').classList.add('hidden');alert(e.message)}
+var chapters = [];
+var selected = new Set();
+var title = '';
+
+document.getElementById('scanBtn').addEventListener('click', function() {
+    var url = document.getElementById('urlInput').value.trim();
+    if (!url) {
+        alert('Link girin!');
+        return;
+    }
+    
+    document.getElementById('loading').classList.remove('hidden');
+    document.getElementById('results').classList.add('hidden');
+    
+    fetch('/api/scrape', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({url: url})
+    })
+    .then(function(res) { return res.json(); })
+    .then(function(data) {
+        document.getElementById('loading').classList.add('hidden');
+        if (data.error) {
+            alert('Hata: ' + data.error);
+            return;
+        }
+        if (!data.chapters || data.chapters.length === 0) {
+            alert('Chapter bulunamadi!');
+            return;
+        }
+        chapters = data.chapters;
+        title = data.title;
+        selected.clear();
+        document.getElementById('mangaTitle').textContent = title;
+        renderChapters();
+        document.getElementById('results').classList.remove('hidden');
+    })
+    .catch(function(err) {
+        document.getElementById('loading').classList.add('hidden');
+        alert('Hata: ' + err.message);
+    });
+});
+
+document.getElementById('selectAllBtn').addEventListener('click', function() {
+    if (selected.size === chapters.length) {
+        selected.clear();
+    } else {
+        for (var i = 0; i < chapters.length; i++) {
+            selected.add(i);
+        }
+    }
+    renderChapters();
+});
+
+document.getElementById('downloadBtn').addEventListener('click', function() {
+    if (selected.size === 0) return;
+    if (selected.size > 3) {
+        if (!confirm('3ten fazla chapter secildi. Uzun surebilir. Devam?')) return;
+    }
+    
+    var selectedChapters = [];
+    selected.forEach(function(i) {
+        selectedChapters.push(chapters[i]);
+    });
+    
+    document.getElementById('results').classList.add('hidden');
+    document.getElementById('progress').classList.remove('hidden');
+    document.getElementById('progressText').textContent = 'PDF hazirlaniyor...';
+    document.getElementById('progressBar').style.width = '30%';
+    
+    fetch('/api/download', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({chapters: selectedChapters, title: title})
+    })
+    .then(function(res) {
+        if (!res.ok) {
+            return res.json().then(function(e) { throw new Error(e.error); });
+        }
+        return res.blob();
+    })
+    .then(function(blob) {
+        document.getElementById('progressBar').style.width = '100%';
+        document.getElementById('progressText').textContent = 'Tamamlandi!';
+        var a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = title.replace(/[^a-z0-9]/gi, '_') + '.pdf';
+        a.click();
+        setTimeout(function() {
+            document.getElementById('progress').classList.add('hidden');
+            document.getElementById('results').classList.remove('hidden');
+        }, 1500);
+    })
+    .catch(function(err) {
+        alert('Hata: ' + err.message);
+        document.getElementById('progress').classList.add('hidden');
+        document.getElementById('results').classList.remove('hidden');
+    });
+});
+
+function renderChapters() {
+    var container = document.getElementById('chapterList');
+    container.innerHTML = '';
+    
+    for (var i = 0; i < chapters.length; i++) {
+        var ch = chapters[i];
+        var isSelected = selected.has(i);
+        var div = document.createElement('div');
+        div.className = 'p-2 rounded cursor-pointer border ' + (isSelected ? 'bg-purple-700 border-purple-400' : 'bg-slate-700 border-slate-600');
+        div.setAttribute('data-index', i);
+        div.innerHTML = '<span class="text-purple-300">Ch ' + ch.number + '</span> - ' + ch.title;
+        div.addEventListener('click', function(e) {
+            var idx = parseInt(this.getAttribute('data-index'));
+            if (selected.has(idx)) {
+                selected.delete(idx);
+            } else {
+                selected.add(idx);
+            }
+            renderChapters();
+        });
+        container.appendChild(div);
+    }
+    
+    document.getElementById('selectedCount').textContent = selected.size;
+    document.getElementById('downloadBtn').disabled = selected.size === 0;
 }
-function render(){
-  const c=document.getElementById('chs');c.innerHTML='';
-  chs.forEach((ch,i)=>{const s=sel.has(i);const d=document.createElement('div');
-    d.className='p-2 rounded cursor-pointer border '+(s?'bg-purple-600/30 border-purple-400':'bg-slate-800/50 border-slate-700');
-    d.onclick=()=>{s?sel.delete(i):sel.add(i);render()};
-    d.innerHTML='<span class="text-purple-300">Ch '+ch.number+'</span> - '+ch.title;c.appendChild(d)});
-  document.getElementById('cnt').textContent=sel.size;document.getElementById('dl').disabled=sel.size===0;
-}
-function selAll(){sel.size===chs.length?sel.clear():chs.forEach((_,i)=>sel.add(i));render()}
-async function down(){
-  if(!sel.size)return;if(sel.size>2&&!confirm('2\'den fazla chapter seçtiniz. Devam?'))return;
-  const s=Array.from(sel).map(i=>chs[i]);
-  document.getElementById('res').classList.add('hidden');document.getElementById('prog').classList.remove('hidden');
-  document.getElementById('ptxt').textContent='PDF hazırlanıyor...';document.getElementById('pbar').style.width='30%';
-  try{
-    const r=await fetch('/api/download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chapters:s,title:ttl})});
-    if(!r.ok){const e=await r.json();throw new Error(e.error||'Hata')}
-    document.getElementById('pbar').style.width='90%';
-    const b=await r.blob();const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=ttl.replace(/[^a-z0-9]/gi,'_')+'.pdf';a.click();
-    document.getElementById('pbar').style.width='100%';document.getElementById('ptxt').textContent='Tamamlandı! ✓';
-    setTimeout(()=>{document.getElementById('prog').classList.add('hidden');document.getElementById('res').classList.remove('hidden')},1500);
-  }catch(e){alert(e.message);document.getElementById('prog').classList.add('hidden');document.getElementById('res').classList.remove('hidden')}
-}
-</script></body></html>'''
+</script>
+</body>
+</html>"""
 
 @app.route('/')
 def index():
-    return render_template_string(HTML)
+    return render_template_string(HTML_TEMPLATE)
 
 @app.route('/api/scrape', methods=['POST'])
-def scrape():
+def api_scrape():
     try:
         url = request.json.get('url', '')
         if not url:
             return jsonify({'error': 'URL gerekli'}), 400
         
         site = scraper.detect_site(url)
-        print(f"\n=== Scraping {site}: {url} ===")
+        print(f"Scraping {site}: {url}")
         
         if site == 'mangadex':
             r = scraper.scrape_mangadex(url)
@@ -345,59 +421,54 @@ def scrape():
             r = scraper.scrape_generic(url)
         
         if r and r.get('chapters'):
-            print(f"Success: {len(r['chapters'])} chapters found")
+            print(f"Found {len(r['chapters'])} chapters")
             return jsonify(r)
         
-        return jsonify({'error': 'Chapter bulunamadı'}), 404
-        
+        return jsonify({'error': 'Chapter bulunamadi'}), 404
     except Exception as e:
-        print(f"Scrape error: {e}")
+        print(f"Error: {e}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/download', methods=['POST'])
-def download():
+def api_download():
     try:
         data = request.json
         chapters = data.get('chapters', [])
         title = data.get('title', 'manga')
         
         if not chapters:
-            return jsonify({'error': 'Chapter seçilmedi'}), 400
+            return jsonify({'error': 'Chapter secilmedi'}), 400
         if len(chapters) > 5:
             return jsonify({'error': 'Max 5 chapter'}), 400
         
-        print(f"\n=== Creating PDF: {title} ({len(chapters)} ch) ===")
+        print(f"Creating PDF: {title} ({len(chapters)} chapters)")
         site = scraper.detect_site(chapters[0].get('url', ''))
         
-        pdf_path = os.path.join(tempfile.gettempdir(), f"m{abs(hash(title))%9999}.pdf")
+        pdf_path = os.path.join(tempfile.gettempdir(), f"manga_{abs(hash(title)) % 9999}.pdf")
         c = canvas.Canvas(pdf_path, pagesize=A4)
         w, h = A4
         
-        # Cover
-        c.setFont("Helvetica-Bold", 22)
-        c.drawString(40, h-80, title[:50])
+        c.setFont("Helvetica-Bold", 20)
+        c.drawString(40, h - 80, title[:50])
         c.setFont("Helvetica", 12)
-        c.drawString(40, h-105, f"{len(chapters)} Chapter")
+        c.drawString(40, h - 100, f"{len(chapters)} Chapter")
         c.showPage()
         
         total = 0
         for ch in chapters:
-            print(f"\nProcessing Ch {ch.get('number')}")
-            c.setFont("Helvetica-Bold", 18)
-            c.drawString(40, h-80, f"Chapter {ch.get('number','?')}")
+            print(f"Processing Ch {ch.get('number')}")
+            c.setFont("Helvetica-Bold", 16)
+            c.drawString(40, h - 80, f"Chapter {ch.get('number', '?')}")
             c.showPage()
             
             imgs = scraper.get_chapter_images(ch.get('url'), site)
-            print(f"  {len(imgs)} images found")
+            print(f"  Found {len(imgs)} images")
             
             if not imgs:
-                c.setFont("Helvetica", 12)
-                c.drawString(40, h/2, "No images found")
-                c.showPage()
                 continue
             
             downloaded = scraper.download_parallel(imgs, ch.get('url'), workers=6)
-            print(f"  {len(downloaded)} downloaded")
+            print(f"  Downloaded {len(downloaded)} images")
             
             for url in imgs:
                 if url not in downloaded:
@@ -410,31 +481,28 @@ def download():
                         img = img.convert('RGB')
                     
                     ratio = img.size[1] / img.size[0]
-                    pw, ph = w-30, h-30
-                    if ratio > ph/pw:
-                        nh, nw = ph, ph/ratio
+                    pw, ph = w - 30, h - 30
+                    if ratio > ph / pw:
+                        nh = ph
+                        nw = ph / ratio
                     else:
-                        nw, nh = pw, pw*ratio
+                        nw = pw
+                        nh = pw * ratio
                     
                     buf = BytesIO()
                     img.save(buf, 'JPEG', quality=75)
                     buf.seek(0)
-                    c.drawImage(ImageReader(buf), (w-nw)/2, (h-nh)/2, nw, nh)
-                    c.setFont("Helvetica", 7)
-                    c.drawString(w/2-20, 8, f"{ch.get('number')}-{total+1}")
+                    c.drawImage(ImageReader(buf), (w - nw) / 2, (h - nh) / 2, nw, nh)
                     c.showPage()
                     total += 1
-                except Exception as e:
-                    print(f"    Image error: {e}")
+                except:
+                    pass
         
         c.save()
-        print(f"\n=== PDF created: {total} pages ===\n")
+        print(f"PDF created: {total} pages")
         return send_file(pdf_path, as_attachment=True, download_name=f"{title[:25]}.pdf")
-        
     except Exception as e:
-        print(f"Download error: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"Error: {e}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/health')
