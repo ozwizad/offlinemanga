@@ -70,6 +70,144 @@ class MangaScraper:
             print(f"MangaDex error: {e}")
             return None
     
+    def scrape_asura(self, url):
+        """Enhanced Asura Scans scraper"""
+        try:
+            print(f"Scraping Asura: {url}")
+            
+            # Try multiple approaches
+            session = requests.Session()
+            session.headers.update({
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Referer': 'https://asuracomic.net/',
+            })
+            
+            time.sleep(2)
+            response = session.get(url, timeout=20)
+            
+            if response.status_code != 200:
+                print(f"Bad status: {response.status_code}")
+                return None
+            
+            soup = BeautifulSoup(response.content, 'html.parser')
+            
+            # Get title - try multiple selectors
+            title = 'Unknown Manga'
+            for selector in ['h1', 'h2', 'h3', '[class*="title"]', '[class*="Title"]']:
+                elems = soup.select(selector)
+                for elem in elems:
+                    text = elem.text.strip()
+                    if len(text) > 3 and len(text) < 100 and 'chapter' not in text.lower():
+                        title = text
+                        break
+                if title != 'Unknown Manga':
+                    break
+            
+            print(f"Found title: {title}")
+            
+            # Get chapters - look for ALL links
+            chapters = []
+            all_links = soup.find_all('a', href=True)
+            
+            print(f"Total links found: {len(all_links)}")
+            
+            for link in all_links:
+                href = link.get('href', '')
+                text = link.text.strip()
+                
+                # Asura chapter patterns
+                is_chapter = False
+                
+                # Check URL patterns
+                if '/chapter/' in href.lower():
+                    is_chapter = True
+                elif '/ch-' in href.lower() or '/ch/' in href.lower():
+                    is_chapter = True
+                
+                # Check text patterns
+                if 'chapter' in text.lower():
+                    is_chapter = True
+                
+                if is_chapter:
+                    # Extract chapter number - try multiple patterns
+                    num = None
+                    
+                    # From text
+                    matches = [
+                        re.search(r'chapter[:\s-]*(\d+\.?\d*)', text, re.I),
+                        re.search(r'ch[:\s-]*(\d+\.?\d*)', text, re.I),
+                        re.search(r'#(\d+\.?\d*)', text),
+                        re.search(r'^(\d+\.?\d*)', text),
+                    ]
+                    
+                    for match in matches:
+                        if match:
+                            num = match.group(1)
+                            break
+                    
+                    # From URL if not found
+                    if not num:
+                        url_matches = [
+                            re.search(r'/chapter[/-](\d+\.?\d*)', href, re.I),
+                            re.search(r'/ch[/-](\d+\.?\d*)', href, re.I),
+                        ]
+                        for match in url_matches:
+                            if match:
+                                num = match.group(1)
+                                break
+                    
+                    if num:
+                        # Make URL absolute
+                        if not href.startswith('http'):
+                            from urllib.parse import urljoin
+                            href = urljoin(url, href)
+                        
+                        # Clean title
+                        clean_text = text if text and len(text) < 200 else f'Chapter {num}'
+                        
+                        chapters.append({
+                            'number': num,
+                            'title': clean_text,
+                            'url': href
+                        })
+            
+            print(f"Found {len(chapters)} potential chapters before dedup")
+            
+            # Remove duplicates
+            seen = set()
+            unique = []
+            for ch in chapters:
+                # Use both URL and number for dedup
+                key = (ch['url'], ch['number'])
+                if key not in seen:
+                    seen.add(key)
+                    unique.append(ch)
+            
+            # Sort by chapter number
+            try:
+                unique.sort(key=lambda x: float(x['number']))
+            except:
+                print("Could not sort chapters")
+                pass
+            
+            print(f"Final unique chapters: {len(unique)}")
+            
+            if len(unique) == 0:
+                print("No chapters found! Debugging info:")
+                # Print some sample links for debugging
+                sample_links = [(l.get('href', '')[:50], l.text.strip()[:30]) for l in all_links[:10]]
+                print(f"Sample links: {sample_links}")
+            
+            return {'title': title, 'chapters': unique}
+            
+        except Exception as e:
+            print(f"Asura scrape error: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
     def scrape_generic(self, url):
         """Generic scraper for most sites"""
         try:
@@ -438,6 +576,8 @@ def scrape_manga():
         result = None
         if site_type == 'mangadex':
             result = scraper.scrape_mangadex(url)
+        elif site_type == 'asura':
+            result = scraper.scrape_asura(url)
         else:
             result = scraper.scrape_generic(url)
         
