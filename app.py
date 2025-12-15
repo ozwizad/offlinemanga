@@ -22,13 +22,15 @@ class MangaScraper:
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.5',
         }
+        self.session = requests.Session()
+        self.session.headers.update(self.headers)
     
     def detect_site(self, url):
         if 'mangadex.org' in url:
             return 'mangadex'
         elif 'asuracomic' in url or 'asura' in url:
             return 'asura'
-        elif 'manganato' in url or 'chapmanganato' in url:
+        elif 'manganato' in url or 'chapmanganato' in url or 'manganato.gg' in url:
             return 'manganato'
         return 'generic'
     
@@ -44,39 +46,58 @@ class MangaScraper:
             # Get manga info
             manga_response = requests.get(f'https://api.mangadex.org/manga/{manga_id}')
             manga_data = manga_response.json()
-            title = manga_data['data']['attributes']['title'].get('en', 'Unknown')
             
-            # Get chapters
-            api_url = f'https://api.mangadex.org/manga/{manga_id}/feed?translatedLanguage[]=en&order[chapter]=asc&limit=500'
-            response = requests.get(api_url)
-            data = response.json()
+            # Get title - try multiple languages
+            titles = manga_data['data']['attributes']['title']
+            title = titles.get('en') or titles.get('ja-ro') or titles.get('ja') or list(titles.values())[0] if titles else 'Unknown'
             
-            chapters = []
-            for item in data.get('data', []):
-                attrs = item['attributes']
-                chapter_num = attrs.get('chapter', 'N/A')
-                chapter_title = attrs.get('title', f'Chapter {chapter_num}')
-                chapter_id = item['id']
+            # Get chapters with pagination
+            all_chapters = []
+            offset = 0
+            limit = 100
+            
+            while True:
+                api_url = f'https://api.mangadex.org/manga/{manga_id}/feed?translatedLanguage[]=en&order[chapter]=asc&limit={limit}&offset={offset}'
+                response = requests.get(api_url)
+                data = response.json()
                 
-                chapters.append({
-                    'number': chapter_num,
-                    'title': chapter_title,
-                    'url': f'https://mangadex.org/chapter/{chapter_id}',
-                    'id': chapter_id
-                })
+                items = data.get('data', [])
+                if not items:
+                    break
+                
+                for item in items:
+                    attrs = item['attributes']
+                    chapter_num = attrs.get('chapter', 'N/A')
+                    chapter_title = attrs.get('title') or f'Chapter {chapter_num}'
+                    chapter_id = item['id']
+                    
+                    all_chapters.append({
+                        'number': chapter_num,
+                        'title': chapter_title,
+                        'url': f'https://mangadex.org/chapter/{chapter_id}',
+                        'id': chapter_id
+                    })
+                
+                if len(items) < limit:
+                    break
+                offset += limit
+                time.sleep(0.3)  # Rate limit
             
-            return {'title': title, 'chapters': chapters}
+            print(f"MangaDex: Found {len(all_chapters)} chapters")
+            return {'title': title, 'chapters': all_chapters}
         except Exception as e:
             print(f"MangaDex error: {e}")
+            import traceback
+            traceback.print_exc()
             return None
     
     def scrape_manganato(self, url):
-        """Scrape Manganato/Chapmanganato - works well"""
+        """Scrape Manganato/Chapmanganato"""
         try:
             print(f"Scraping Manganato: {url}")
             time.sleep(1)
             
-            response = requests.get(url, headers=self.headers, timeout=15)
+            response = self.session.get(url, timeout=15)
             soup = BeautifulSoup(response.content, 'html.parser')
             
             # Get title
@@ -129,7 +150,6 @@ class MangaScraper:
         try:
             print(f"Scraping Asura: {url}")
             
-            # Try multiple approaches
             session = requests.Session()
             session.headers.update({
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -147,7 +167,7 @@ class MangaScraper:
             
             soup = BeautifulSoup(response.content, 'html.parser')
             
-            # Get title - try multiple selectors
+            # Get title
             title = 'Unknown Manga'
             for selector in ['h1', 'h2', 'h3', '[class*="title"]', '[class*="Title"]']:
                 elems = soup.select(selector)
@@ -161,34 +181,22 @@ class MangaScraper:
             
             print(f"Found title: {title}")
             
-            # Get chapters - look for ALL links
+            # Get chapters
             chapters = []
             all_links = soup.find_all('a', href=True)
-            
-            print(f"Total links found: {len(all_links)}")
             
             for link in all_links:
                 href = link.get('href', '')
                 text = link.text.strip()
                 
-                # Asura chapter patterns
                 is_chapter = False
-                
-                # Check URL patterns
-                if '/chapter/' in href.lower():
+                if '/chapter/' in href.lower() or '/ch-' in href.lower() or '/ch/' in href.lower():
                     is_chapter = True
-                elif '/ch-' in href.lower() or '/ch/' in href.lower():
-                    is_chapter = True
-                
-                # Check text patterns
                 if 'chapter' in text.lower():
                     is_chapter = True
                 
                 if is_chapter:
-                    # Extract chapter number - try multiple patterns
                     num = None
-                    
-                    # From text
                     matches = [
                         re.search(r'chapter[:\s-]*(\d+\.?\d*)', text, re.I),
                         re.search(r'ch[:\s-]*(\d+\.?\d*)', text, re.I),
@@ -201,7 +209,6 @@ class MangaScraper:
                             num = match.group(1)
                             break
                     
-                    # From URL if not found
                     if not num:
                         url_matches = [
                             re.search(r'/chapter[/-](\d+\.?\d*)', href, re.I),
@@ -213,12 +220,10 @@ class MangaScraper:
                                 break
                     
                     if num:
-                        # Make URL absolute
                         if not href.startswith('http'):
                             from urllib.parse import urljoin
                             href = urljoin(url, href)
                         
-                        # Clean title
                         clean_text = text if text and len(text) < 200 else f'Chapter {num}'
                         
                         chapters.append({
@@ -227,33 +232,21 @@ class MangaScraper:
                             'url': href
                         })
             
-            print(f"Found {len(chapters)} potential chapters before dedup")
-            
             # Remove duplicates
             seen = set()
             unique = []
             for ch in chapters:
-                # Use both URL and number for dedup
                 key = (ch['url'], ch['number'])
                 if key not in seen:
                     seen.add(key)
                     unique.append(ch)
             
-            # Sort by chapter number
             try:
                 unique.sort(key=lambda x: float(x['number']))
             except:
-                print("Could not sort chapters")
                 pass
             
-            print(f"Final unique chapters: {len(unique)}")
-            
-            if len(unique) == 0:
-                print("No chapters found! Debugging info:")
-                # Print some sample links for debugging
-                sample_links = [(l.get('href', '')[:50], l.text.strip()[:30]) for l in all_links[:10]]
-                print(f"Sample links: {sample_links}")
-            
+            print(f"Found {len(unique)} chapters")
             return {'title': title, 'chapters': unique}
             
         except Exception as e:
@@ -268,7 +261,7 @@ class MangaScraper:
             print(f"Scraping: {url}")
             time.sleep(1)
             
-            response = requests.get(url, headers=self.headers, timeout=15)
+            response = self.session.get(url, timeout=15)
             soup = BeautifulSoup(response.content, 'html.parser')
             
             # Get title
@@ -283,13 +276,10 @@ class MangaScraper:
             chapters = []
             all_links = soup.find_all('a', href=True)
             
-            print(f"Found {len(all_links)} total links")
-            
             for link in all_links:
                 href = link.get('href', '')
                 text = link.text.strip()
                 
-                # Look for chapter patterns
                 is_chapter = False
                 if any(x in href.lower() for x in ['/chapter/', '/ch-', '/ch/']):
                     is_chapter = True
@@ -297,7 +287,6 @@ class MangaScraper:
                     is_chapter = True
                 
                 if is_chapter:
-                    # Extract number
                     num_match = re.search(r'(\d+\.?\d*)', text)
                     if not num_match:
                         num_match = re.search(r'chapter[/-]?(\d+)', href, re.I)
@@ -305,7 +294,6 @@ class MangaScraper:
                     if num_match:
                         num = num_match.group(1)
                         
-                        # Make absolute URL
                         if not href.startswith('http'):
                             from urllib.parse import urljoin
                             href = urljoin(url, href)
@@ -324,7 +312,6 @@ class MangaScraper:
                     seen.add(ch['url'])
                     unique.append(ch)
             
-            # Sort
             try:
                 unique.sort(key=lambda x: float(x['number']))
             except:
@@ -346,74 +333,145 @@ class MangaScraper:
             print(f"Site type: {site_type}")
             
             if site_type == 'mangadex':
-                # Extract chapter ID from URL
-                chapter_id = re.search(r'chapter/([a-f0-9-]+)', chapter_url)
-                if not chapter_id:
-                    print("Could not extract chapter ID from URL")
-                    return []
+                return self._get_mangadex_images(chapter_url)
+            elif site_type == 'manganato':
+                return self._get_manganato_images(chapter_url)
+            else:
+                return self._get_generic_images(chapter_url)
                 
-                chapter_id = chapter_id.group(1)
-                print(f"MangaDex Chapter ID: {chapter_id}")
-                
-                try:
-                    # Get image server info
-                    api_url = f'https://api.mangadex.org/at-home/server/{chapter_id}'
-                    print(f"Calling API: {api_url}")
-                    
-                    response = requests.get(api_url, timeout=10)
-                    print(f"API Response Status: {response.status_code}")
-                    
-                    if response.status_code != 200:
-                        print(f"API Error: {response.text}")
-                        return []
-                    
-                    data = response.json()
-                    print(f"API Response: {data.keys()}")
-                    
-                    base_url = data['baseUrl']
-                    chapter_hash = data['chapter']['hash']
-                    
-                    # Use high quality images (data) or data-saver
-                    image_files = data['chapter'].get('data', [])
-                    if not image_files:
-                        image_files = data['chapter'].get('dataSaver', [])
-                    
-                    print(f"Found {len(image_files)} image files")
-                    
-                    images = []
-                    for filename in image_files:
-                        img_url = f'{base_url}/data/{chapter_hash}/{filename}'
-                        images.append(img_url)
-                        print(f"  Image: {img_url[:80]}")
-                    
-                    return images
-                except Exception as api_error:
-                    print(f"MangaDex API Error: {api_error}")
-                    import traceback
-                    traceback.print_exc()
-                    return []
+        except Exception as e:
+            print(f"Get images error: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
+    
+    def _get_mangadex_images(self, chapter_url):
+        """Get MangaDex images using API"""
+        try:
+            chapter_id = re.search(r'chapter/([a-f0-9-]+)', chapter_url)
+            if not chapter_id:
+                print("Could not extract chapter ID from URL")
+                return []
             
-            # For other sites, scrape HTML
-            print(f"Fetching page: {chapter_url}")
-            response = requests.get(chapter_url, headers=self.headers, timeout=15)
+            chapter_id = chapter_id.group(1)
+            print(f"MangaDex Chapter ID: {chapter_id}")
+            
+            # Get image server info
+            api_url = f'https://api.mangadex.org/at-home/server/{chapter_id}'
+            print(f"Calling API: {api_url}")
+            
+            response = requests.get(api_url, timeout=15)
+            print(f"API Response Status: {response.status_code}")
+            
+            if response.status_code != 200:
+                print(f"API Error: {response.text}")
+                return []
+            
+            data = response.json()
+            
+            base_url = data.get('baseUrl')
+            chapter_data = data.get('chapter', {})
+            chapter_hash = chapter_data.get('hash')
+            
+            if not base_url or not chapter_hash:
+                print(f"Missing baseUrl or hash in response")
+                return []
+            
+            # Use high quality images first, fall back to data-saver
+            image_files = chapter_data.get('data', [])
+            quality = 'data'
+            
+            if not image_files:
+                image_files = chapter_data.get('dataSaver', [])
+                quality = 'data-saver'
+            
+            print(f"Found {len(image_files)} image files (quality: {quality})")
+            
+            images = []
+            for filename in image_files:
+                img_url = f'{base_url}/{quality}/{chapter_hash}/{filename}'
+                images.append(img_url)
+            
+            print(f"Generated {len(images)} image URLs")
+            return images
+            
+        except Exception as e:
+            print(f"MangaDex API Error: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
+    
+    def _get_manganato_images(self, chapter_url):
+        """Get Manganato images with proper referer"""
+        try:
+            print(f"Fetching Manganato chapter: {chapter_url}")
+            
+            # Use session with proper headers
+            headers = self.headers.copy()
+            headers['Referer'] = chapter_url
+            
+            response = self.session.get(chapter_url, headers=headers, timeout=15)
             print(f"Page response: {response.status_code}")
             
             soup = BeautifulSoup(response.content, 'html.parser')
             
             images = []
             
-            # Look for common manga reader containers first
+            # Manganato uses specific container
+            container = soup.select_one('.container-chapter-reader') or soup.select_one('.reading-content') or soup
+            
+            for img in container.find_all('img'):
+                src = img.get('src') or img.get('data-src') or img.get('data-lazy-src')
+                
+                if not src:
+                    continue
+                
+                # Filter out non-manga images
+                skip_patterns = ['logo', 'icon', 'avatar', 'banner', 'ad', 'advertisement',
+                               'facebook', 'twitter', 'discord', '.gif', 'emoji']
+                
+                if any(pattern in src.lower() for pattern in skip_patterns):
+                    continue
+                
+                # Must be image file
+                if not any(ext in src.lower() for ext in ['.jpg', '.jpeg', '.png', '.webp']):
+                    continue
+                
+                if not src.startswith('http'):
+                    from urllib.parse import urljoin
+                    src = urljoin(chapter_url, src)
+                
+                images.append(src)
+            
+            # Remove duplicates
+            images = list(dict.fromkeys(images))
+            
+            print(f"Found {len(images)} manga images")
+            return images
+            
+        except Exception as e:
+            print(f"Manganato images error: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
+    
+    def _get_generic_images(self, chapter_url):
+        """Get images from generic sites"""
+        try:
+            print(f"Fetching page: {chapter_url}")
+            response = self.session.get(chapter_url, timeout=15)
+            print(f"Page response: {response.status_code}")
+            
+            soup = BeautifulSoup(response.content, 'html.parser')
+            
+            images = []
+            
+            # Look for reader containers
             reader_containers = soup.find_all(['div', 'section'], class_=lambda x: x and any(
                 word in str(x).lower() for word in ['reader', 'chapter', 'page', 'image-container', 'content']
             ))
             
-            # If found container, only search within it
-            if reader_containers:
-                print(f"Found {len(reader_containers)} potential reader containers")
-                search_area = reader_containers
-            else:
-                print("No reader container found, searching entire page")
-                search_area = [soup]
+            search_area = reader_containers if reader_containers else [soup]
             
             for container in search_area:
                 for img in container.find_all('img'):
@@ -422,26 +480,19 @@ class MangaScraper:
                     if not src:
                         continue
                     
-                    # Filter out common non-manga images
-                    skip_patterns = [
-                        'logo', 'icon', 'avatar', 'banner', 'ad', 'advertisement',
-                        'facebook', 'twitter', 'discord', 'patreon',
-                        'button', 'nav', 'header', 'footer', 'sidebar',
-                        '.gif', 'emoji', 'badge', 'flag'
-                    ]
+                    skip_patterns = ['logo', 'icon', 'avatar', 'banner', 'ad', 'advertisement',
+                                   'facebook', 'twitter', 'discord', 'patreon', 'button', 'nav',
+                                   'header', 'footer', 'sidebar', '.gif', 'emoji', 'badge', 'flag']
                     
                     if any(pattern in src.lower() for pattern in skip_patterns):
                         continue
                     
-                    # Check if it's likely a manga page (has image extension)
                     if not any(ext in src.lower() for ext in ['.jpg', '.jpeg', '.png', '.webp']):
                         continue
                     
-                    # Check image size attributes (manga pages are usually big)
                     width = img.get('width') or img.get('data-width')
                     height = img.get('height') or img.get('data-height')
                     
-                    # Skip small images (likely icons/buttons)
                     if width and height:
                         try:
                             if int(width) < 200 or int(height) < 200:
@@ -449,33 +500,62 @@ class MangaScraper:
                         except:
                             pass
                     
-                    # Make URL absolute
                     if not src.startswith('http'):
                         from urllib.parse import urljoin
                         src = urljoin(chapter_url, src)
                     
                     images.append(src)
             
-            # Remove duplicates while preserving order
-            seen = set()
-            unique_images = []
-            for img in images:
-                if img not in seen:
-                    seen.add(img)
-                    unique_images.append(img)
+            # Remove duplicates
+            images = list(dict.fromkeys(images))
             
-            print(f"Found {len(unique_images)} manga page images (filtered from {len(images)} total)")
+            print(f"Found {len(images)} manga images")
+            return images
             
-            return unique_images
         except Exception as e:
-            print(f"Get images error: {e}")
+            print(f"Generic images error: {e}")
             import traceback
             traceback.print_exc()
             return []
+    
+    def download_image(self, img_url, referer_url, site_type='generic'):
+        """Download image with proper headers for each site"""
+        try:
+            headers = self.headers.copy()
+            
+            # Site-specific headers
+            if site_type == 'mangadex':
+                headers['Referer'] = 'https://mangadex.org/'
+                headers['Accept'] = 'image/webp,image/apng,image/*,*/*;q=0.8'
+            elif site_type == 'manganato':
+                # Manganato needs specific referer
+                headers['Referer'] = referer_url
+                headers['Accept'] = 'image/webp,image/apng,image/*,*/*;q=0.8'
+                # Try to extract the actual domain
+                from urllib.parse import urlparse
+                parsed = urlparse(img_url)
+                headers['Origin'] = f'{parsed.scheme}://{parsed.netloc}'
+            else:
+                headers['Referer'] = referer_url
+            
+            response = requests.get(img_url, headers=headers, timeout=30, stream=True)
+            
+            if response.status_code == 403:
+                print(f"  403 Forbidden - trying alternative headers...")
+                # Try with different user agent
+                headers['User-Agent'] = 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1'
+                response = requests.get(img_url, headers=headers, timeout=30, stream=True)
+            
+            return response
+            
+        except Exception as e:
+            print(f"Download image error: {e}")
+            return None
+
 
 scraper = MangaScraper()
 
-# HTML Template for the web interface
+# HTML Template
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
 <html lang="tr">
@@ -523,7 +603,7 @@ HTML_TEMPLATE = '''
             </div>
             <div class="text-xs text-purple-400/70 mt-2 font-mono">
                 <div>✓ <strong>En İyi:</strong> MangaDex (API var, %100 çalışır)</div>
-                <div>✓ <strong>İyi:</strong> Manganato, Mangakakalot (stabil)</div>
+                <div>✓ <strong>İyi:</strong> Manganato (stabil)</div>
                 <div>⚠️ <strong>Sınırlı:</strong> Asura Scans (Cloudflare korumalı)</div>
             </div>
         </div>
@@ -775,7 +855,16 @@ def download_chapters():
         if len(chapters) > 5:
             return jsonify({'error': 'Maximum 5 chapters at once'}), 400
         
-        print(f"Creating PDF for {len(chapters)} chapters")
+        print(f"\n{'='*60}")
+        print(f"CREATING PDF")
+        print(f"Manga: {manga_title}")
+        print(f"Chapters: {len(chapters)}")
+        print(f"{'='*60}")
+        
+        # Detect site type from first chapter URL
+        first_url = chapters[0].get('url', '')
+        site_type = scraper.detect_site(first_url)
+        print(f"Site type: {site_type}")
         
         # Create PDF
         temp_dir = tempfile.gettempdir()
@@ -794,13 +883,15 @@ def download_chapters():
         c.drawString(50, height - 170, "High Quality Manga PDF")
         c.showPage()
         
+        total_pages = 0
+        
         # Process each chapter
         for chapter_idx, ch in enumerate(chapters):
             chapter_url = ch.get('url')
             chapter_title = ch.get('title', f"Chapter {ch.get('number', '?')}")
             
             print(f"\n{'='*50}")
-            print(f"Processing: {chapter_title}")
+            print(f"Processing Chapter {chapter_idx + 1}/{len(chapters)}: {chapter_title}")
             print(f"URL: {chapter_url}")
             print(f"{'='*50}")
             
@@ -808,7 +899,6 @@ def download_chapters():
             c.setFont("Helvetica-Bold", 24)
             c.drawString(50, height - 100, f"Chapter {ch.get('number', '?')}")
             c.setFont("Helvetica", 14)
-            # Wrap long titles
             if len(chapter_title) > 50:
                 c.drawString(50, height - 130, chapter_title[:50])
                 c.drawString(50, height - 150, chapter_title[50:100])
@@ -818,108 +908,80 @@ def download_chapters():
             
             # Get images for this chapter
             try:
-                site_type = scraper.detect_site(chapter_url)
-                print(f"Site type: {site_type}")
-                
                 images = scraper.get_chapter_images(chapter_url, site_type)
                 print(f"Found {len(images)} images")
                 
                 if not images:
-                    # No images page
                     c.setFont("Helvetica", 12)
                     c.drawString(50, height/2, "No images found for this chapter")
                     c.drawString(50, height/2 - 30, f"Visit: {chapter_url[:70]}")
                     c.showPage()
                     continue
                 
-                print(f"  → Downloading ALL {len(images)} images (this may take a while)")
+                print(f"Downloading {len(images)} images...")
                 
-                # Download and add each image
                 successful_images = 0
                 failed_images = 0
                 
-                for img_idx, img_url in enumerate(images):  # ALL IMAGES!
+                for img_idx, img_url in enumerate(images):
                     try:
-                        print(f"  Downloading image {img_idx + 1}/{len(images)}: {img_url[:60]}")
+                        print(f"  [{img_idx + 1}/{len(images)}] {img_url[:60]}...")
                         
-                        # Try download with retry
-                        max_retries = 3
+                        # Download with retry
                         img_response = None
-                        
-                        for retry in range(max_retries):
-                            try:
-                                # Add referer header to bypass hotlink protection
-                                img_headers = scraper.headers.copy()
-                                img_headers['Referer'] = chapter_url
-                                
-                                img_response = requests.get(
-                                    img_url, 
-                                    headers=img_headers, 
-                                    timeout=20,
-                                    stream=True
-                                )
-                                
-                                if img_response.status_code == 200:
-                                    break
-                                else:
-                                    print(f"  Retry {retry + 1}/{max_retries}: Status {img_response.status_code}")
-                                    time.sleep(1)
-                            except requests.exceptions.RequestException as e:
-                                print(f"  Retry {retry + 1}/{max_retries}: {e}")
-                                time.sleep(1)
+                        for retry in range(3):
+                            img_response = scraper.download_image(img_url, chapter_url, site_type)
+                            
+                            if img_response and img_response.status_code == 200:
+                                break
+                            
+                            print(f"    Retry {retry + 1}/3: Status {img_response.status_code if img_response else 'None'}")
+                            time.sleep(1)
                         
                         if not img_response or img_response.status_code != 200:
-                            print(f"  ✗ Failed after {max_retries} retries")
+                            print(f"    ✗ Failed after retries")
                             failed_images += 1
                             continue
                         
-                        # Verify it's actually an image
+                        # Verify it's an image
                         content_type = img_response.headers.get('content-type', '')
                         if 'image' not in content_type.lower() and len(img_response.content) < 1000:
-                            print(f"  ✗ Not a valid image (content-type: {content_type})")
+                            print(f"    ✗ Not a valid image")
                             failed_images += 1
                             continue
                         
                         # Open image
                         img = Image.open(BytesIO(img_response.content))
-                        print(f"  Image size: {img.size}, mode: {img.mode}")
                         
-                        # Skip very small images (likely icons/logos that passed filter)
+                        # Skip small images
                         if img.size[0] < 300 or img.size[1] < 300:
-                            print(f"  ✗ Image too small ({img.size}), skipping")
+                            print(f"    ✗ Too small ({img.size})")
                             failed_images += 1
                             continue
                         
-                        # Convert to RGB if needed
+                        # Convert to RGB
                         if img.mode not in ('RGB', 'L'):
                             img = img.convert('RGB')
                         
-                        # Get dimensions
+                        # Calculate dimensions
                         img_width, img_height = img.size
                         aspect_ratio = img_height / img_width
                         
-                        # Calculate PDF dimensions (fit to page with margins)
-                        page_width = width - 40  # 20px margin each side
+                        page_width = width - 40
                         page_height = height - 40
                         
-                        # Scale to fit page while maintaining aspect ratio
                         if aspect_ratio > (page_height / page_width):
-                            # Height is limiting factor
                             new_height = page_height
                             new_width = new_height / aspect_ratio
                         else:
-                            # Width is limiting factor
                             new_width = page_width
                             new_height = new_width * aspect_ratio
                         
-                        # Center on page
                         x_pos = (width - new_width) / 2
                         y_pos = (height - new_height) / 2
                         
-                        # Optimize image quality
+                        # Save to buffer
                         temp_img = BytesIO()
-                        
-                        # High quality JPEG
                         if img.mode == 'L':
                             img.save(temp_img, format='JPEG', quality=95, optimize=True)
                         else:
@@ -935,42 +997,36 @@ def download_chapters():
                             preserveAspectRatio=True
                         )
                         
-                        # Page number footer
+                        # Page number
                         c.setFont("Helvetica", 8)
-                        c.drawString(
-                            width/2 - 50, 15,
-                            f"Ch.{ch.get('number')} - Page {successful_images + 1}"
-                        )
+                        c.drawString(width/2 - 50, 15, f"Ch.{ch.get('number')} - Page {successful_images + 1}")
                         
                         c.showPage()
                         successful_images += 1
-                        print(f"  ✓ Added to PDF")
+                        total_pages += 1
+                        print(f"    ✓ Added to PDF")
                         
-                        # Small delay to avoid rate limiting
                         time.sleep(0.3)
                         
                     except Exception as img_error:
-                        print(f"  ✗ Image error: {img_error}")
+                        print(f"    ✗ Error: {img_error}")
                         failed_images += 1
                         continue
                 
-                print(f"✓ Chapter {ch.get('number')} complete! ({successful_images} pages added, {failed_images} failed)")
+                print(f"Chapter complete: {successful_images} pages, {failed_images} failed")
                 
                 if successful_images == 0:
-                    # No images were successfully added
                     c.setFont("Helvetica", 12)
-                    c.drawString(50, height/2, f"Could not load any images for this chapter")
-                    c.drawString(50, height/2 - 30, f"This might be a site compatibility issue")
-                    c.drawString(50, height/2 - 50, f"Try: MangaDex or Manganato")
+                    c.drawString(50, height/2, f"Could not load images for this chapter")
+                    c.drawString(50, height/2 - 30, f"Site may have hotlink protection")
+                    c.drawString(50, height/2 - 50, f"Try: MangaDex for best results")
                     c.showPage()
                 
-                
             except Exception as chapter_error:
-                print(f"✗ Chapter error: {chapter_error}")
+                print(f"Chapter error: {chapter_error}")
                 import traceback
                 traceback.print_exc()
                 
-                # Add error page
                 c.setFont("Helvetica", 12)
                 c.drawString(50, height/2, f"Failed to process chapter")
                 c.drawString(50, height/2 - 30, f"Error: {str(chapter_error)[:60]}")
@@ -979,9 +1035,11 @@ def download_chapters():
         
         # Save PDF
         c.save()
-        print(f"\n{'='*50}")
+        
+        print(f"\n{'='*60}")
         print(f"✓ PDF CREATED: {pdf_path}")
-        print(f"{'='*50}\n")
+        print(f"✓ Total pages: {total_pages}")
+        print(f"{'='*60}\n")
         
         return send_file(pdf_path, as_attachment=True, download_name=f"{manga_title[:30]}.pdf")
         
@@ -995,6 +1053,34 @@ def download_chapters():
 def health():
     """Health check"""
     return jsonify({'status': 'ok'})
+
+@app.route('/api/test-mangadex')
+def test_mangadex():
+    """Test MangaDex API"""
+    try:
+        # Test with One Punch Man
+        chapter_id = "32d1a84e-0b7c-4d38-a634-38b7e4cd3a43"  # Sample chapter
+        api_url = f'https://api.mangadex.org/at-home/server/{chapter_id}'
+        
+        response = requests.get(api_url, timeout=10)
+        data = response.json()
+        
+        result = {
+            'status': response.status_code,
+            'baseUrl': data.get('baseUrl'),
+            'hash': data.get('chapter', {}).get('hash'),
+            'image_count': len(data.get('chapter', {}).get('data', [])),
+            'sample_image': None
+        }
+        
+        if result['baseUrl'] and result['hash']:
+            images = data.get('chapter', {}).get('data', [])
+            if images:
+                result['sample_image'] = f"{result['baseUrl']}/data/{result['hash']}/{images[0]}"
+        
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
